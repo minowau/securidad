@@ -26,7 +26,7 @@
     "express-validator": "^7.0.1",
     "socket.io": "^4.7.4",
     "socket.io-client": "^4.7.4",
-    "tensorflow.js": "^4.17.0",
+    "@tensorflow/tfjs-node": "^4.17.0",
     "uuid": "^9.0.1"
   },
   "devDependencies": {
