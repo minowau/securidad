@@ -7,6 +7,8 @@ import { createServer } from 'http';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import authRoutes from './routes/auth.js';
+import accountRoutes from './routes/accounts.js';
+import transactionRoutes from './routes/transactions.js';
 import behavioralRoutes from './routes/behavioral.js';
 import { socketAuthMiddleware } from './middleware/socketAuth.js';
 import { setupBehavioralMonitoring } from './services/behavioralMonitoring.js';
@@ -39,6 +41,8 @@ app.use(limiter);
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/accounts', accountRoutes);
+app.use('/api/transactions', transactionRoutes);
 app.use('/api/behavioral', behavioralRoutes);
 
 // Socket.IO setup
