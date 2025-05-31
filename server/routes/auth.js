@@ -1,12 +1,12 @@
 import express from 'express';
 import { body, validationResult } from 'express-validator';
 import jwt from 'jsonwebtoken';
+import asyncHandler from 'express-async-handler';
 import User from '../models/User.js';
 import { authMiddleware } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Validation middleware
 const loginValidation = [
   body('username').trim().notEmpty(),
   body('password').trim().notEmpty()
@@ -19,122 +19,184 @@ const registerValidation = [
   body('pin').trim().isLength({ min: 4, max: 4 }).isNumeric()
 ];
 
-// Register new user
-router.post('/register', registerValidation, async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+router.post('/register', registerValidation, asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  const { username, email, password, pin } = req.body;
+
+  const user = await User.create({
+    username,
+    email,
+    password,
+    pin
+  });
+
+  const token = jwt.sign(
+    { id: user._id, username: user.username },
+    process.env.JWT_SECRET,
+    { expiresIn: '1h' }
+  );
+
+  const refreshToken = jwt.sign(
+    { id: user._id },
+    process.env.JWT_REFRESH_SECRET,
+    { expiresIn: '7d' }
+  );
+
+  user.refreshToken = refreshToken;
+  await user.save();
+
+  res.status(201).json({
+    token,
+    refreshToken,
+    user: {
+      id: user._id,
+      username: user.username,
+      email: user.email
     }
+  });
+}));
 
-    const { username, email, password, pin } = req.body;
+router.post('/login', loginValidation, asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
 
-    const existingUser = await User.findOne({ 
-      $or: [{ username }, { email }] 
+  const { username, password } = req.body;
+  const user = await User.findOne({ username });
+
+  if (!user || !(await user.comparePassword(password))) {
+    user && user.securitySettings.loginAttempts++;
+    if (user && user.securitySettings.loginAttempts >= 5) {
+      user.securitySettings.lockUntil = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+    }
+    if (user) await user.save();
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  if (user.securitySettings.lockUntil && user.securitySettings.lockUntil > new Date()) {
+    return res.status(401).json({
+      error: 'Account locked. Try again later.',
+      lockUntil: user.securitySettings.lockUntil
     });
+  }
 
-    if (existingUser) {
-      return res.status(400).json({ 
-        error: 'Username or email already exists' 
-      });
-    }
+  const token = jwt.sign(
+    { id: user._id, username: user.username },
+    process.env.JWT_SECRET,
+    { expiresIn: '1h' }
+  );
 
-    const user = new User({ username, email, password, pin });
-    await user.save();
+  const refreshToken = jwt.sign(
+    { id: user._id },
+    process.env.JWT_REFRESH_SECRET,
+    { expiresIn: '7d' }
+  );
 
-    const token = jwt.sign(
+  user.securitySettings.loginAttempts = 0;
+  user.securitySettings.lastLogin = new Date();
+  user.securitySettings.lastLoginIP = req.ip;
+  user.securitySettings.lastLoginDevice = req.headers['user-agent'];
+  user.refreshToken = refreshToken;
+  user.lastActivity = new Date();
+  await user.save();
+
+  res.json({
+    token,
+    refreshToken,
+    user: {
+      id: user._id,
+      username: user.username,
+      email: user.email
+    },
+    requiresPin: true
+  });
+}));
+
+router.post('/verify-pin', authMiddleware, asyncHandler(async (req, res) => {
+  const { pin } = req.body;
+  const user = await User.findById(req.user.id);
+
+  if (!user || !(await user.comparePin(pin))) {
+    return res.status(401).json({ error: 'Invalid PIN' });
+  }
+
+  user.lastActivity = new Date();
+  await user.save();
+
+  res.json({ verified: true });
+}));
+
+router.post('/verify-pattern', authMiddleware, asyncHandler(async (req, res) => {
+  const { pattern } = req.body;
+  const user = await User.findById(req.user.id);
+
+  if (!user || !user.comparePattern(pattern)) {
+    return res.status(401).json({ error: 'Pattern verification failed' });
+  }
+
+  user.lastActivity = new Date();
+  await user.save();
+
+  res.json({ verified: true });
+}));
+
+router.post('/save-pattern', authMiddleware, asyncHandler(async (req, res) => {
+  const { pattern } = req.body;
+  const user = await User.findById(req.user.id);
+
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  user.drawPattern = pattern;
+  user.lastActivity = new Date();
+  await user.save();
+
+  res.json({ message: 'Pattern saved successfully' });
+}));
+
+router.post('/refresh-token', asyncHandler(async (req, res) => {
+  const { refreshToken } = req.body;
+  
+  if (!refreshToken) {
+    return res.status(401).json({ error: 'Refresh token required' });
+  }
+
+  const user = await User.findOne({ refreshToken });
+  
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid refresh token' });
+  }
+
+  try {
+    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+    
+    const newToken = jwt.sign(
       { id: user._id, username: user.username },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
 
-    res.status(201).json({ token });
+    res.json({ token: newToken });
   } catch (error) {
-    res.status(500).json({ error: 'Registration failed' });
+    return res.status(401).json({ error: 'Invalid refresh token' });
   }
-});
+}));
 
-// Login user
-router.post('/login', loginValidation, async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-
-    const { username, password } = req.body;
-    const user = await User.findOne({ username });
-
-    if (!user || !(await user.comparePassword(password))) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // Update security settings
-    user.securitySettings.lastLogin = new Date();
-    user.securitySettings.loginAttempts = 0;
+router.post('/logout', authMiddleware, asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user.id);
+  
+  if (user) {
+    user.refreshToken = undefined;
     await user.save();
-
-    const token = jwt.sign(
-      { id: user._id, username: user.username },
-      process.env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
-
-    res.json({ token, requiresPin: true });
-  } catch (error) {
-    res.status(500).json({ error: 'Login failed' });
   }
-});
 
-// Verify PIN
-router.post('/verify-pin', authMiddleware, async (req, res) => {
-  try {
-    const { pin } = req.body;
-    const user = await User.findById(req.user.id);
-
-    if (!user || !(await user.comparePin(pin))) {
-      return res.status(401).json({ error: 'Invalid PIN' });
-    }
-
-    res.json({ verified: true });
-  } catch (error) {
-    res.status(500).json({ error: 'PIN verification failed' });
-  }
-});
-
-// Verify drawing pattern
-router.post('/verify-pattern', authMiddleware, async (req, res) => {
-  try {
-    const { pattern } = req.body;
-    const user = await User.findById(req.user.id);
-
-    if (!user || !user.comparePattern(pattern)) {
-      return res.status(401).json({ error: 'Pattern verification failed' });
-    }
-
-    res.json({ verified: true });
-  } catch (error) {
-    res.status(500).json({ error: 'Pattern verification failed' });
-  }
-});
-
-// Save drawing pattern
-router.post('/save-pattern', authMiddleware, async (req, res) => {
-  try {
-    const { pattern } = req.body;
-    const user = await User.findById(req.user.id);
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    user.drawPattern = pattern;
-    await user.save();
-
-    res.json({ message: 'Pattern saved successfully' });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to save pattern' });
-  }
-});
+  res.json({ message: 'Logged out successfully' });
+}));
 
 export default router;
