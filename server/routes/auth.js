@@ -15,7 +15,8 @@ const loginValidation = [
 const registerValidation = [
   body('username').trim().isLength({ min: 3 }),
   body('email').trim().isEmail(),
-  body('password').trim().isLength({ min: 8 })
+  body('password').trim().isLength({ min: 8 }),
+  body('pin').trim().isLength({ min: 4, max: 4 }).isNumeric()
 ];
 
 // Register new user
@@ -26,7 +27,7 @@ router.post('/register', registerValidation, async (req, res) => {
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { username, email, password } = req.body;
+    const { username, email, password, pin } = req.body;
 
     const existingUser = await User.findOne({ 
       $or: [{ username }, { email }] 
@@ -38,7 +39,7 @@ router.post('/register', registerValidation, async (req, res) => {
       });
     }
 
-    const user = new User({ username, email, password });
+    const user = new User({ username, email, password, pin });
     await user.save();
 
     const token = jwt.sign(
@@ -79,22 +80,60 @@ router.post('/login', loginValidation, async (req, res) => {
       { expiresIn: '1h' }
     );
 
-    res.json({ token });
+    res.json({ token, requiresPin: true });
   } catch (error) {
     res.status(500).json({ error: 'Login failed' });
   }
 });
 
-// Get user profile
-router.get('/profile', authMiddleware, async (req, res) => {
+// Verify PIN
+router.post('/verify-pin', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
+    const { pin } = req.body;
+    const user = await User.findById(req.user.id);
+
+    if (!user || !(await user.comparePin(pin))) {
+      return res.status(401).json({ error: 'Invalid PIN' });
+    }
+
+    res.json({ verified: true });
+  } catch (error) {
+    res.status(500).json({ error: 'PIN verification failed' });
+  }
+});
+
+// Verify drawing pattern
+router.post('/verify-pattern', authMiddleware, async (req, res) => {
+  try {
+    const { pattern } = req.body;
+    const user = await User.findById(req.user.id);
+
+    if (!user || !user.comparePattern(pattern)) {
+      return res.status(401).json({ error: 'Pattern verification failed' });
+    }
+
+    res.json({ verified: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Pattern verification failed' });
+  }
+});
+
+// Save drawing pattern
+router.post('/save-pattern', authMiddleware, async (req, res) => {
+  try {
+    const { pattern } = req.body;
+    const user = await User.findById(req.user.id);
+
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-    res.json(user);
+
+    user.drawPattern = pattern;
+    await user.save();
+
+    res.json({ message: 'Pattern saved successfully' });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch profile' });
+    res.status(500).json({ error: 'Failed to save pattern' });
   }
 });
 
